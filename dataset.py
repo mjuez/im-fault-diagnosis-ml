@@ -16,8 +16,7 @@
 
 """ Engine Dataset loading.
 
-Opens h5 file dataset and loads CVV and V datasets prepared for
-its usage with keras DNN library.
+Opens h5 file dataset and loads CVV and V datasets.
 Loading a subset containing the first N seconds of the dataset
 is also possible.
 
@@ -32,7 +31,7 @@ __copyright__ = "Copyright 2018, Mario Juez-Gil"
 __credits__ = ["Mario Juez-Gil", "Cesar Garcia-Osorio",
                "Álvar Arnaiz-González", "Carlos López"]
 __license__ = "GPLv3"
-__version__ = "0.5"
+__version__ = "0.6"
 __maintainer__ = "Mario Juez-Gil"
 __email__ = "mariojg@ubu.es"
 __status__ = "Development"
@@ -51,6 +50,7 @@ FREQ_12HZ = "twelve"
 FREQ_30HZ = "thirty"
 FREQ_60HZ = "sixty"
 FREQ_LINE = "line"
+FREQ_ALL_PAPER = "all_paper"
 
 T_STEPS = 1  # shape index of timesteps value
 
@@ -76,15 +76,8 @@ MASK_V = (AREF, AX, AY, AZ)
 
 # With this implementation the file is going to be opened each time we request
 # a window, which could penalize the performance.
-def data_window(begin=0, size=5, workload=ALL, frequency=ALL, mask=MASK_ALL,
-                root_path="/home/mariojg/research/datasets/motor_faults"):
-
-	def read_indexes():
-		with h5py.File(indexes_file, "r") as si:
-			indexes = list(si[workload][frequency][ALL])
-			random.shuffle(indexes)
-			# when using with statements, it closes the file after returning.
-			return indexes
+def data_window(size=5, workload=ALL, frequency=ALL, mask=MASK_ALL, norm=True,
+                bd=False, root_path="/home/mariojg/research/datasets/motor_faults"):
 
 	def mask_to_dict():
 		mask_dict = {
@@ -97,60 +90,37 @@ def data_window(begin=0, size=5, workload=ALL, frequency=ALL, mask=MASK_ALL,
 
 		return mask_dict
 
-	def remove_bearing_defect(inputs, outputs):
-		def indexes_without_bd(outputs):
-			bd_indexes = []
-			bd = (0, 0, 0, 1)
-			idx = 0
-			for exp in outputs:
-				if(np.array_equal(exp, bd)):
-					bd_indexes.append(idx)
-				idx += 1
-
-			nobd_indexes = np.arange(len(outputs)).tolist()
-			for index in sorted(bd_indexes, reverse=True):
-				del nobd_indexes[index]
-
-			return nobd_indexes
-
-		no_bd_indexes = indexes_without_bd(outputs)
-		filtered_inputs = None
-		filtered_outputs = outputs[no_bd_indexes,:3]
-		if(len(inputs) == 2):
-			filtered_inputs = [inputs[0][no_bd_indexes],inputs[1][no_bd_indexes]]
-		else:
-			filtered_inputs = inputs[no_bd_indexes]
-		
-		return filtered_inputs, filtered_outputs
-
-	dataset_file = f"{root_path}/full_dataset_normalized.h5"
-	indexes_file = f"{root_path}/subdatasets_indexes.h5"
-	num_seconds = 10
-	indexes = read_indexes()
+	dataset_file = f"{root_path}/full_dataset_norm.h5" if norm else f"{root_path}/full_dataset.h5"
 	mask = mask_to_dict()
 
+	inputs = []
+	outputs = None
 	with h5py.File(dataset_file, "r") as ds:
 		num_timesteps = {
-			CVV: int((ds[CVV].shape[T_STEPS] / 10) * num_seconds),
-			V: int((ds[V].shape[T_STEPS] / 10) * num_seconds)
+			CVV: int(ds[f"data/{CVV}"].shape[T_STEPS] * size / 10),
+			V: int(ds[f"data/{V}"].shape[T_STEPS] * size / 10)
 		}
 
-		labels = [feats[2:6] for feats in ds["exp"]]
-
-		inputs = []
-		outputs = np.array([labels[idx] for idx in indexes])
+		ids = None
+		if(frequency == "all_paper"):
+			ids_three = ds[f"meta/{workload}/three"][()]
+			ids_thirty = ds[f"meta/{workload}/thirty"][()]
+			ids_line = ds[f"meta/{workload}/line"][()]
+			ids = np.concatenate((ids_three, ids_thirty, ids_line))
+		else:
+			ids = ds[f"meta/{workload}/{frequency}"][()]
+		filtered_ids = []
+		exps = ds["data/exp"][()]
+		for i in ids:
+			cond = exps[i][5] == 1 or tuple(exps[i][[2,3,4,5]]) if bd else exps[i][5] == 0
+			if(cond):
+				filtered_ids.append(i)
+		filtered_ids = np.sort(np.array(filtered_ids)).tolist()
 
 		for data_filter, cols in mask.items():
 			if len(cols) > 0:
-				tps = int(num_timesteps[data_filter] / num_seconds)
-				first_step = int(begin * tps)
-				last_step = int((begin + size) * tps)
-				X = []
-				for idx in indexes:
-					ins = ds[data_filter][idx, first_step:last_step, cols]
-					X.append(np.array(ins))
-				inputs.append(np.array(X))
+				inputs.append(ds[f"data/{data_filter}"][filtered_ids][:,:num_timesteps[data_filter],cols])
 
 		if len(inputs) == 1:
 			inputs = inputs[0]
-		return remove_bearing_defect(inputs, outputs)
+	return (inputs, outputs)
